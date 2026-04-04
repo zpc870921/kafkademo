@@ -55,7 +55,15 @@ namespace WebApplication1
                 })
                 .SetPartitionsRevokedHandler((c, partitions) =>
                 {
-                    StopPartitionWorkers(partitions.Select(p => p.Partition));
+                    try
+                    {
+                        StopPartitionWorkers(partitions.Select(p => p.Partition));
+                        c.Commit();
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogError(ex,"撤销分区");
+                    }
                 })
                 .Build();
 

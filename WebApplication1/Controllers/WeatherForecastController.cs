@@ -1,5 +1,6 @@
 using Confluent.Kafka;
 using Microsoft.AspNetCore.Mvc;
+using System.Diagnostics;
 
 namespace WebApplication1.Controllers
 {
@@ -43,15 +44,31 @@ namespace WebApplication1.Controllers
 
             try
             {
-                // 发送消息
-                var result = await producer.ProduceAsync(
-                    "test-topic",  // 主题名称
-                    new Message<Null, string>
-                    {
-                        Value = "Hello Kafka from .NET!" // 消息内容
-                    });
+                // 发送100条消息
+                var produceTasks = new List<Task<DeliveryResult<Null, string>>>();
 
-                Console.WriteLine($"发送成功：Topic={result.Topic}, Partition={result.Partition}, Offset={result.Offset}");
+                for (int i = 1; i <= 100; i++)
+                {
+                    var message = new Message<Null, string>
+                    {
+                        Value = $"Hello Kafka from .NET! #{i}"
+                    };
+
+                    // 异步发送并将任务加入列表
+                    produceTasks.Add(producer.ProduceAsync("test-topic", message));
+                }
+
+                // 等待所有发送完成
+                var results = await Task.WhenAll(produceTasks);
+
+                // 输出发送结果
+                foreach (var result in results)
+                {
+                    Console.WriteLine($"发送成功：Topic={result.Topic}, Partition={result.Partition}, Offset={result.Offset}");
+                }
+
+                // 确保生产者刷新所有消息
+                producer.Flush(TimeSpan.FromSeconds(10));
             }
             catch (Exception ex)
             {
