@@ -71,16 +71,21 @@ namespace WebApplication1
                     retry => TimeSpan.FromMilliseconds(200 * Math.Pow(2, retry)));
         }
 
-        protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+        protected override Task ExecuteAsync(CancellationToken stoppingToken)
+        {
+            // 使用 LongRunning 避免每次 Consume 都分配 ThreadPool 工作项
+            return Task.Factory.StartNew(() => ConsumeLoop(stoppingToken),
+                stoppingToken, TaskCreationOptions.LongRunning, TaskScheduler.Default).Unwrap();
+        }
+
+        private async Task ConsumeLoop(CancellationToken stoppingToken)
         {
             _consumer.Subscribe(_sourceTopic);
-           // var commitTask = Task.Run(() => CommitLoop(stoppingToken), stoppingToken);
             try
             {
                 while (!stoppingToken.IsCancellationRequested)
                 {
-                    //var result = _consumer.Consume(stoppingToken);
-                    var result = await Task.Run(() => _consumer.Consume(stoppingToken), stoppingToken);
+                    var result = _consumer.Consume(stoppingToken);
                     if (result == null) continue;
 
                     if (_activePartitions.TryGetValue(result.Partition, out var ctx))
@@ -107,7 +112,11 @@ namespace WebApplication1
                 // 2. 将存在于本地但还没发送到 Broker 的位移最后进行一次同步强制提交！
                 try { _consumer.Commit(); } catch { /* 忽略没改变的报错 */ }
 
-                // 3. 最后才能释放客户端
+                // 3. 刷新 DLQ 生产者缓冲区，确保死信消息不丢
+                try { _dlqProducer.Flush(TimeSpan.FromSeconds(10)); } catch { }
+                _dlqProducer.Dispose();
+
+                // 4. 最后才能释放消费者客户端
                 _consumer.Close();
             }
         }
@@ -126,8 +135,8 @@ namespace WebApplication1
                 Cts = new CancellationTokenSource()
             };
 
-            _activePartitions.TryAdd(partition, ctx);
             ctx.ProcessingTask = Task.Run(() => ProcessPartitionLoop(ctx));
+            _activePartitions.TryAdd(partition, ctx);
         }
 
         private async Task ProcessPartitionLoop(PartitionContext ctx)
@@ -185,7 +194,7 @@ namespace WebApplication1
             catch (OperationCanceledException) { /* 正常退出 */ }
             catch (Exception ex)
             {
-                _logger.LogCritical(ex, $"分区 {ctx.Partition} 发生不可恢复的致命异常停止");
+                _logger.LogCritical(ex, "分区 {Partition} 发生不可恢复的致命异常停止", ctx.Partition);
                 // 实际生产中这里如果崩了，应当引入报警，并考虑重新抛出以触发应用重启
             }
         }
@@ -262,7 +271,7 @@ namespace WebApplication1
         {
             // ✅ 建议：这里做幂等控制（数据库唯一键 / Redis去重）
 
-            _logger.LogInformation($"处理消息: {msg.Message.Value}");
+            _logger.LogInformation("处理消息: {Value}", msg.Message.Value);
 
             await Task.CompletedTask;
         }
@@ -284,7 +293,11 @@ namespace WebApplication1
             }
 
             // 第二步：并行等待所有分区的处理任务完成（最多 10 秒）
-            var waitTasks = contexts.Select(ctx => ctx.ProcessingTask).ToArray();
+            // 过滤掉可能为 null 的 ProcessingTask（防止 TryAdd 之前的竞态窗口）
+            var waitTasks = contexts
+                .Select(ctx => ctx.ProcessingTask)
+                .Where(t => t != null)
+                .ToArray();
             if (waitTasks.Length > 0)
             {
                 Task.WaitAll(waitTasks, TimeSpan.FromSeconds(12)); // 略大于 CancelAfter 时间

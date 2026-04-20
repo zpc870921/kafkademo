@@ -76,5 +76,59 @@ namespace WebApplication1.Controllers
             }
             return Ok();
         }
+
+        /// <summary>
+        /// 使用 Kafka 事务发布消息，保证批量消息原子性（全部成功或全部回滚）
+        /// </summary>
+        [HttpPost]
+        public async Task<IActionResult> TransactionalPublish([FromBody] string[] messages)
+        {
+            if (messages == null || messages.Length == 0)
+                return BadRequest("消息列表不能为空");
+
+            var config = new ProducerConfig
+            {
+                BootstrapServers = "localhost:9092",
+                Acks = Acks.All,
+                // 事务必需配置
+                TransactionalId = $"txn-weather-{Environment.MachineName}",
+                // 开启幂等以保证 Exactly-Once 语义
+                EnableIdempotence = true,
+                MessageSendMaxRetries = 3
+            };
+
+            using var producer = new ProducerBuilder<string, string>(config).Build();
+
+            // 初始化事务（每个 TransactionalId 只需调用一次）
+            producer.InitTransactions(TimeSpan.FromSeconds(10));
+
+            try
+            {
+                // 开启事务
+                producer.BeginTransaction();
+
+                foreach (var msg in messages)
+                {
+                    var kafkaMessage = new Message<string, string>
+                    {
+                        Key = Guid.NewGuid().ToString(),
+                        Value = msg
+                    };
+
+                    await producer.ProduceAsync("test-topic", kafkaMessage);
+                }
+
+                // 提交事务 —— 所有消息原子性可见
+                producer.CommitTransaction();
+
+                return Ok(new { success = true, count = messages.Length });
+            }
+            catch (Exception ex)
+            {
+                // 回滚事务 —— 所有消息都不会被消费者看到
+                try { producer.AbortTransaction(); } catch { }
+                return StatusCode(500, new { success = false, error = ex.Message });
+            }
+        }
     }
 }

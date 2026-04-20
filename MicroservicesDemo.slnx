@@ -1,5 +1,0 @@
-<Solution>
-  <Project Path="src/AuthServer/AuthServer.csproj" />
-  <Project Path="src/OrderApi/OrderApi.csproj" />
-  <Project Path="src/ProductApi/ProductApi.csproj" />
-</Solution>
